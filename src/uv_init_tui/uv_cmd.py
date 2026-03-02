@@ -1,5 +1,8 @@
+"""Helpers for constructing and executing `uv` CLI commands."""
+
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 from collections.abc import Sequence
@@ -20,6 +23,11 @@ def _run(cmd: Sequence[str], cwd: Path | None = None) -> str:
     Raises:
         UVError: If `uv` is missing or command returns non-zero.
     """
+    env = os.environ.copy()
+    # Avoid uv environment mismatch warnings/behavior when parent shells export
+    # UVIRTUAL_ENV for a different project.
+    env.pop("UVIRTUAL_ENV", None)
+
     try:
         proc = subprocess.run(
             list(cmd),
@@ -27,9 +35,17 @@ def _run(cmd: Sequence[str], cwd: Path | None = None) -> str:
             check=False,
             capture_output=True,
             text=True,
+            timeout=300,
+            env=env,
         )
     except FileNotFoundError as e:
-        raise UVError("`uv` was not found on PATH. Install uv first.") from e
+        if cwd is not None and not cwd.exists():
+            raise UVError(f"Working directory does not exist: {cwd}") from e
+        if e.filename == "uv" or (cmd and cmd[0] == "uv"):
+            raise UVError("`uv` was not found on PATH. Install uv first.") from e
+        raise UVError(f"Failed to start command: {' '.join(cmd)}") from e
+    except subprocess.TimeoutExpired as e:
+        raise UVError(f"Command timed out after 300s: {' '.join(cmd)}") from e
 
     output = (proc.stdout or "") + (proc.stderr or "")
     if proc.returncode != 0:
@@ -64,9 +80,19 @@ def build_uv_init_cmd(
     return cmd
 
 
-def build_uv_add_cmd(*, deps: Sequence[str]) -> list[str]:
-    """Build the argv list for `uv add`."""
-    return ["uv", "add", *deps]
+def build_uv_add_cmd(*, deps: Sequence[str], no_sync: bool = True) -> list[str]:
+    """Build the argv list for `uv add`.
+
+    Args:
+        deps: Dependencies to add.
+        no_sync: If True, skip environment sync/installation and only update
+            project metadata/lock data.
+    """
+    cmd = ["uv", "add"]
+    if no_sync:
+        cmd.append("--no-sync")
+    cmd.extend(deps)
+    return cmd
 
 
 def build_uv_remove_cmd(*, deps: Sequence[str], dev: bool = False) -> list[str]:
@@ -112,17 +138,18 @@ def uv_init(
     return _run(cmd, cwd=target_dir)
 
 
-def uv_add(*, project_root: Path, deps: Sequence[str]) -> str:
+def uv_add(*, project_root: Path, deps: Sequence[str], no_sync: bool = True) -> str:
     """
     Add dependencies to an initialized uv project via `uv add`.
 
     Args:
         project_root: Directory containing pyproject.toml.
         deps: Dependencies to add (e.g. ["httpx", "pydantic"]).
+        no_sync: If True, skip environment sync/installation.
     """
     if not deps:
         return ""
-    cmd = build_uv_add_cmd(deps=deps)
+    cmd = build_uv_add_cmd(deps=deps, no_sync=no_sync)
     return _run(cmd, cwd=project_root)
 
 

@@ -1,5 +1,9 @@
+"""Textual application screens and CLI entry points for uv-init-tui."""
+
 from __future__ import annotations
 
+import shutil
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -43,6 +47,31 @@ class InitPlan:
     python_version: str
     deps: list[str]
     scripts: dict[str, str]
+    overwrite: bool
+
+
+DEFAULT_PROJECTS_DIR = Path.home() / "dev" / "py"
+PROJECT_NAME_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$")
+
+
+def _slugify_project_name(name: str) -> str:
+    """Convert arbitrary input into a normalized project-name slug."""
+    slug = name.strip().lower()
+    slug = re.sub(r"[^a-z0-9._-]+", "-", slug)
+    slug = re.sub(r"[-_.]+", "-", slug)
+    return slug.strip("-")
+
+
+def _resolve_project_name(name: str) -> str | None:
+    """Return a valid project name, using a sluggified fallback when needed."""
+    raw = name.strip()
+    if PROJECT_NAME_RE.fullmatch(raw):
+        return raw
+
+    slug = _slugify_project_name(raw)
+    if PROJECT_NAME_RE.fullmatch(slug):
+        return slug
+    return None
 
 
 def _format_shell_preview(*, cwd: Path, cmd: Sequence[str]) -> str:
@@ -58,15 +87,15 @@ def _format_shell_preview(*, cwd: Path, cmd: Sequence[str]) -> str:
 def _build_preview_text(plan: InitPlan) -> str:
     """Build the confirmation text showing exact uv commands to be executed."""
     init_cmd = build_uv_init_cmd(
-        name=plan.name,
+        name=plan.target_dir.name,
         description=plan.description,
         is_lib=plan.is_lib,
         python_version=plan.python_version,
     )
-    project_root = (plan.target_dir / plan.name).resolve()
+    project_root = plan.target_dir.resolve()
 
     lines = ["The following uv commands will run:", ""]
-    lines.append(_format_shell_preview(cwd=plan.target_dir, cmd=init_cmd))
+    lines.append(_format_shell_preview(cwd=project_root.parent, cmd=init_cmd))
 
     if plan.deps:
         add_cmd = build_uv_add_cmd(deps=plan.deps)
@@ -81,6 +110,8 @@ def _build_preview_text(plan: InitPlan) -> str:
                 f"Non-uv step: update [project.scripts] in {project_root / 'pyproject.toml'}",
             ]
         )
+    if plan.overwrite:
+        lines.extend(["", f"Non-uv step: remove existing directory first: {project_root}"])
 
     return "\n".join(lines)
 
@@ -99,32 +130,43 @@ class WizardScreen(Screen):
     ]
 
     def __init__(self, cfg: AppConfig, *, enable_scripts: bool = False) -> None:
+        """Initialize the wizard screen with loaded config and feature flags."""
         super().__init__()
         self.cfg: AppConfig = cfg
         self.enable_scripts: bool = enable_scripts
+        self._syncing_name_to_dir: bool = False
 
         # Holds the scripts user has added in the session.
         # Key = script name, value = "module:callable".
         self._scripts: dict[str, str] = {}
 
     def compose(self) -> ComposeResult:
+        """Build the main form used to collect project initialization inputs."""
         yield Header()
 
         with ScrollableContainer(id="body"):
             yield Static("uv init TUI", id="title")
 
-            yield Label("Target directory (project folder will be created inside):")
-            yield Input(value=self.cfg.default_directory, id="dir")
-
             yield Label("Project name:")
             yield Input(placeholder="my-cool-project", id="name")
+
+            yield Label("Target directory:")
+            yield Input(value=str(DEFAULT_PROJECTS_DIR), id="dir")
+
+            with Horizontal(id="overwrite_row"):
+                yield Label("Directory exists. Overwrite?")
+                yield Switch(value=False, id="overwrite")
 
             yield Label("Description:")
             yield Input(placeholder="A brief description…", id="desc")
 
-            with Horizontal():
-                yield Label("Library project? (--lib)")
-                yield Switch(value=bool(self.cfg.default_is_lib), id="is_lib")
+            with Horizontal(id="switches"):
+                with Vertical(id="library"):
+                    yield Label("Library project? (--lib)")
+                    yield Switch(value=bool(self.cfg.default_is_lib), id="is_lib")
+                with Vertical(id="package"):
+                    yield Label("Package project? (--package)")
+                    yield Switch(value=bool(self.cfg.default_is_pkg), id="is_pkg")
 
             yield Label("Python version (--python):")
             yield Input(value=self.cfg.default_python, id="pyver")
@@ -164,23 +206,63 @@ class WizardScreen(Screen):
         yield Footer()
 
     def on_mount(self) -> None:
+        """Apply post-mount widget setup for optional components."""
         # Small UX tweak: DataTable cursor makes sense as row-based selection.
         if self.enable_scripts:
             self.query_one("#scripts_table", DataTable).cursor_type = "row"
 
+        self.query_one("#overwrite_row", Horizontal).display = False
+        self._sync_target_dir_from_name()
+        self._refresh_overwrite_state()
+
+    def _project_dir_for_name(self, name: str) -> Path:
+        """Map a project name to the default `$HOME/dev/py/{name}` directory."""
+        normalized = _resolve_project_name(name) or name.strip()
+        return DEFAULT_PROJECTS_DIR / normalized if normalized else DEFAULT_PROJECTS_DIR
+
+    def _sync_target_dir_from_name(self) -> None:
+        """Mirror current project name into the target directory input."""
+        name = self.query_one("#name", Input).value
+        target = self._project_dir_for_name(name)
+        self._syncing_name_to_dir = True
+        self.query_one("#dir", Input).value = str(target)
+        self._syncing_name_to_dir = False
+
+    def _refresh_overwrite_state(self) -> bool:
+        """Show/hide overwrite toggle based on whether target directory exists."""
+        dir_str = self.query_one("#dir", Input).value.strip()
+        target_path = Path(dir_str).expanduser()
+        exists = target_path.exists()
+
+        row = self.query_one("#overwrite_row", Horizontal)
+        overwrite_switch = self.query_one("#overwrite", Switch)
+        name_input = self.query_one("#name", Input)
+        dir_input = self.query_one("#dir", Input)
+        row.display = exists
+        name_input.set_class(exists, "warning-path")
+        dir_input.set_class(exists, "warning-path")
+        if not exists:
+            overwrite_switch.value = False
+        return exists
+
     def _status(self, text: str) -> None:
+        """Display a short status message in the wizard footer area."""
         self.query_one("#status", Static).update(text)
 
     def action_quit(self) -> None:
+        """Exit the TUI application."""
         self.app.exit()
 
     def action_edit_config(self) -> None:
+        """Open the configuration editor screen."""
         self.app.push_screen(ConfigScreen(self.cfg))
 
     def action_start(self) -> None:
+        """Keyboard action to trigger run/confirm flow."""
         self._run()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
+        """Route button presses to wizard actions and script-editor handlers."""
         bid = event.button.id
 
         # Scripts editor handlers (if enabled)
@@ -202,6 +284,24 @@ class WizardScreen(Screen):
             self.action_edit_config()
         elif bid == "quit_btn":
             self.action_quit()
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        """Keep directory mirroring and overwrite visibility up to date."""
+        if event.input.id == "name" and not self._syncing_name_to_dir:
+            self._sync_target_dir_from_name()
+
+        if event.input.id in {"name", "dir"}:
+            exists = self._refresh_overwrite_state()
+            name_value = self.query_one("#name", Input).value.strip()
+            resolved_name = _resolve_project_name(name_value)
+            if not resolved_name:
+                self._status("Project name is invalid and cannot be sluggified into a valid name.")
+            elif resolved_name != name_value:
+                self._status(f'Project name will be normalized to "{resolved_name}".')
+            elif exists:
+                self._status("Warning: target directory already exists.")
+            else:
+                self._status("")
 
     def _add_script(self) -> None:
         """Add a script entry to the in-memory script mapping + refresh table."""
@@ -230,9 +330,12 @@ class WizardScreen(Screen):
             return
 
         coord = table.cursor_coordinate
-        row_key = table.coordinate_to_cell_key(coord).row_key  # we store script name as row key
-        if isinstance(row_key, str) and row_key in self._scripts:
-            del self._scripts[row_key]
+        row_key = table.coordinate_to_cell_key(coord).row_key
+        # Textual returns a RowKey wrapper, not a raw string.
+        key_value = getattr(row_key, "value", row_key)
+        script_name = str(key_value)
+        if script_name in self._scripts:
+            del self._scripts[script_name]
             self._refresh_scripts_table()
 
     def _refresh_scripts_table(self) -> None:
@@ -255,24 +358,44 @@ class WizardScreen(Screen):
         is_lib = self.query_one("#is_lib", Switch).value
         pyver = self.query_one("#pyver", Input).value.strip() or self.cfg.default_python
 
-        deps_widget = self.query_one("#deps", SelectionList[str])
+        deps_widget = self.query_one("#deps", SelectionList)
         deps = list(deps_widget.selected)
 
         if not name:
             self._status("Project name is required.")
             return
+        resolved_name = _resolve_project_name(name)
+        if not resolved_name:
+            self._status("Project name is invalid and cannot be sluggified into a valid name.")
+            return
 
         target_dir = Path(dir_str).expanduser().resolve()
+        overwrite = self.query_one("#overwrite", Switch).value
+
+        if target_dir.name != resolved_name:
+            self._status(
+                f'Project name resolves to "{resolved_name}". Target directory name must match.'
+            )
+            return
+
+        if target_dir.exists() and not overwrite:
+            self._status(
+                "Target directory already exists. Toggle overwrite or change name/target directory."
+            )
+            self._refresh_overwrite_state()
+            return
+
         scripts = dict(self._scripts) if self.enable_scripts else {}
 
         plan = InitPlan(
             target_dir=target_dir,
-            name=name,
+            name=resolved_name,
             description=desc,
             is_lib=is_lib,
             python_version=pyver,
             deps=deps,
             scripts=scripts,
+            overwrite=overwrite,
         )
         self.app.push_screen(ConfirmScreen(plan), self._on_confirm)
 
@@ -296,10 +419,12 @@ class ConfirmScreen(ModalScreen[InitPlan | None]):
     ]
 
     def __init__(self, plan: InitPlan) -> None:
+        """Initialize the confirmation modal with an immutable init plan."""
         super().__init__()
         self.plan: InitPlan = plan
 
     def compose(self) -> ComposeResult:
+        """Build the modal showing command preview and confirmation controls."""
         with Vertical(id="confirm_body"):
             yield Static("Preview Commands", id="confirm_title")
             yield Static(
@@ -314,12 +439,15 @@ class ConfirmScreen(ModalScreen[InitPlan | None]):
                 yield Button("Execute", variant="success", id="confirm_execute")
 
     def action_execute(self) -> None:
+        """Confirm and dismiss the modal with the current plan."""
         self.dismiss(self.plan)
 
     def action_back_to_edit(self) -> None:
+        """Cancel execution and return to the wizard for edits."""
         self.dismiss(None)
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
+        """Map modal button presses to execute/back actions."""
         if event.button.id == "confirm_back":
             self.action_back_to_edit()
         if event.button.id == "confirm_execute":
@@ -338,11 +466,13 @@ class RunScreen(Screen):
     """
 
     def __init__(self, plan: InitPlan) -> None:
+        """Initialize run screen state and in-memory log buffer."""
         super().__init__()
         self.plan: InitPlan = plan
         self._log_lines: list[str] = []
 
     def compose(self) -> ComposeResult:
+        """Build the run view containing output log and back button."""
         yield Header()
         with Vertical(id="run_body"):
             yield Static("Running…", id="run_title")
@@ -351,15 +481,32 @@ class RunScreen(Screen):
         yield Footer()
 
     def on_mount(self) -> None:
+        """Start execution immediately after the screen mounts."""
         self._go()
 
     def _log(self, text: str) -> None:
+        """Append a line to the run log widget."""
         self._log_lines.append(text)
         self.query_one("#log", Static).update("\n".join(self._log_lines).strip())
 
     def _go(self) -> None:
+        """Execute the planned init/add/scripts workflow and capture output."""
+        project_root = self.plan.target_dir.resolve()
+        parent_dir = project_root.parent
+
+        if not parent_dir.exists():
+            parent_dir.mkdir(parents=True, exist_ok=True)
+            self._log(f"Created parent directory: {parent_dir}")
+
+        if self.plan.overwrite and project_root.exists():
+            if project_root.is_dir():
+                shutil.rmtree(project_root)
+            else:
+                project_root.unlink()
+            self._log(f"Removed existing path: {project_root}")
+
         self._log(f"Target directory: {self.plan.target_dir}")
-        self._log(f"Project name:     {self.plan.name}")
+        self._log(f"Project name:     {project_root.name}")
         self._log(f"Library:          {self.plan.is_lib}")
         self._log(f"Python:           {self.plan.python_version}")
         self._log(f"Deps:             {', '.join(self.plan.deps) if self.plan.deps else '(none)'}")
@@ -370,15 +517,15 @@ class RunScreen(Screen):
 
         try:
             init_cmd = build_uv_init_cmd(
-                name=self.plan.name,
+                name=project_root.name,
                 description=self.plan.description,
                 is_lib=self.plan.is_lib,
                 python_version=self.plan.python_version,
             )
             self._log(f"$ {shlex_join(init_cmd)}")
             out = uv_init(
-                target_dir=self.plan.target_dir,
-                name=self.plan.name,
+                target_dir=parent_dir,
+                name=project_root.name,
                 description=self.plan.description,
                 is_lib=self.plan.is_lib,
                 python_version=self.plan.python_version,
@@ -386,7 +533,9 @@ class RunScreen(Screen):
             if out:
                 self._log(out)
 
-            project_root = (self.plan.target_dir / self.plan.name).resolve()
+            if not project_root.exists():
+                raise UVError(f"`uv init` completed but project directory was not created: {project_root}")
+
             pyproject_path = project_root / "pyproject.toml"
 
             if self.plan.scripts:
@@ -394,9 +543,9 @@ class RunScreen(Screen):
                 self._log(f"Updated [project.scripts] in {pyproject_path}")
 
             if self.plan.deps:
-                add_cmd = build_uv_add_cmd(deps=self.plan.deps)
+                add_cmd = build_uv_add_cmd(deps=self.plan.deps, no_sync=True)
                 self._log(f"$ {shlex_join(add_cmd)}")
-            out2 = uv_add(project_root=project_root, deps=self.plan.deps)
+            out2 = uv_add(project_root=project_root, deps=self.plan.deps, no_sync=True)
             if out2:
                 self._log(out2)
 
@@ -408,6 +557,7 @@ class RunScreen(Screen):
             self._log(str(e))
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
+        """Return to the previous screen when Back is pressed."""
         if event.button.id == "back":
             self.app.pop_screen()
 
@@ -421,10 +571,12 @@ class ConfigScreen(Screen):
         """Posted when config is saved so the app can refresh screens."""
 
     def __init__(self, cfg: AppConfig) -> None:
+        """Initialize config editor with the current application config."""
         super().__init__()
         self.cfg: AppConfig = cfg
 
     def compose(self) -> ComposeResult:
+        """Build the configuration editor form."""
         yield Header()
         with ScrollableContainer():
             yield Static(f"Config: {CONFIG_PATH}", id="cfg_title")
@@ -453,9 +605,11 @@ class ConfigScreen(Screen):
         yield Footer()
 
     def _status(self, text: str) -> None:
+        """Display a status message in the config editor."""
         self.query_one("#cfg_status", Static).update(text)
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
+        """Handle Save/Cancel actions and persist updated configuration."""
         if event.button.id == "cancel":
             self.app.pop_screen()
             return
@@ -487,32 +641,20 @@ class UVInitTui(App):
     We pass enable_scripts from the Typer CLI to the wizard screen.
     """
 
-    CSS = """
-    #body { padding: 1 2; }
-    #title { content-align: center middle; height: 3; }
-    #buttons { height: 3; margin-top: 1; }
-    #status { margin-top: 1; }
-    #confirm_body { padding: 1 2; width: 100%; height: 100%; }
-    #confirm_title { height: 2; content-align: left middle; text-style: bold; }
-    #confirm_subtitle { margin-bottom: 1; }
-    #preview_box { height: 1fr; border: solid $secondary; padding: 1; }
-    #preview_commands { width: 1fr; }
-    #confirm_buttons { height: 3; margin-top: 1; align: right middle; }
-    #run_body { padding: 1 2; }
-    #run_title { height: 2; }
-    #log { height: 1fr; border: solid $primary; padding: 1; }
-    #cfg_title { height: 2; }
-    """
+    CSS_PATH = Path(__file__).resolve().parents[2] / "styles.tcss"
 
     def __init__(self, *, enable_scripts: bool = False) -> None:
+        """Initialize app-wide flags and load persisted configuration."""
         super().__init__()
         self.enable_scripts: bool = enable_scripts
         self.cfg: AppConfig = load_config()
 
     def on_mount(self) -> None:
+        """Push the initial wizard screen when the app starts."""
         self.push_screen(WizardScreen(self.cfg, enable_scripts=self.enable_scripts))
 
     def on_config_screen_saved(self, _: ConfigScreen.Saved) -> None:
+        """Reload config from disk and rebuild the wizard with new defaults."""
         # Reload from disk (covers in-app edits + manual edits)
         self.cfg = load_config()
 

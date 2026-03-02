@@ -1,3 +1,5 @@
+"""Configuration loading and persistence for uv-init-tui."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, asdict, field
@@ -26,9 +28,11 @@ class AppConfig:
         so it’s easy to read and hand-edit.
     """
 
-    default_directory: str = "."
+    default_directory: str = "~/dev/py"
     default_python: str = "3.14"
-    default_is_lib: bool = False
+    default_is_lib: bool = True
+    default_is_pkg: bool = False
+    
 
     # Shown in the dependency picker (SelectionList)
     common_dependencies: list[str] = field(
@@ -74,14 +78,26 @@ def _toml_dumps_minimal(data: dict[str, Any]) -> str:
     This avoids pulling in a TOML writing dependency for config,
     and keeps the file human-friendly.
     """
+    def _quote(value: str) -> str:
+        # Emit a TOML basic string with escaped special chars.
+        escaped = (
+            value.replace("\\", "\\\\")
+            .replace('"', '\\"')
+            .replace("\n", "\\n")
+            .replace("\t", "\\t")
+        )
+        return f'"{escaped}"'
+
     lines: list[str] = []
     for key, value in data.items():
         if isinstance(value, bool):
             lines.append(f"{key} = {'true' if value else 'false'}")
         elif isinstance(value, str):
-            lines.append(f'{key} = "{value}"')
+            lines.append(f"{key} = {_quote(value)}")
         elif isinstance(value, list):
-            items = ", ".join(f'"{item}"' for item in value)
+            if not all(isinstance(item, str) for item in value):
+                raise TypeError(f"Unsupported list item type for {key}: expected list[str]")
+            items = ", ".join(_quote(item) for item in value)
             lines.append(f"{key} = [{items}]")
         else:
             raise TypeError(f"Unsupported config type for {key}: {type(value)}")

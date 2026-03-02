@@ -1,3 +1,5 @@
+"""Utilities for editing generated project `pyproject.toml` files."""
+
 from __future__ import annotations
 
 from collections.abc import Mapping, MutableMapping

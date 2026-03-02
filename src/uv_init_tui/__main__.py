@@ -1,3 +1,5 @@
+"""Module entry point for `python -m uv_init_tui`."""
+
 from __future__ import annotations
 
 from .app import main

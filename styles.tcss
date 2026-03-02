@@ -1,0 +1,179 @@
+/* Global layout */
+Screen {
+    background: $surface;
+    color: $text;
+}
+
+Header {
+    dock: top;
+}
+
+Footer {
+    dock: bottom;
+}
+
+Label {
+    margin: 1 0 0 0;
+    color: $text;
+}
+
+Input {
+    margin: 0 0 1 0;
+    border: round $primary;
+    background: $panel;
+}
+
+Input.warning-path {
+    background: $warning;
+    color: $text-warning;
+    border: round $text-warning;
+}
+
+Switch {
+    margin: 0 0 1 0;
+    padding: 0;
+}
+
+Button {
+    min-width: 16;
+}
+
+/* Wizard */
+#body {
+    padding: 1 2;
+}
+
+#title {
+    height: 3;
+    content-align: center middle;
+    text-style: bold;
+    color: $accent;
+}
+
+#deps {
+    height: 12;
+    border: round $primary;
+    background: $boost;
+    margin: 0 0 1 0;
+}
+
+#scripts_table {
+    height: 10;
+    border: round $secondary;
+    margin: 0 0 1 0;
+}
+
+#buttons {
+    height: 3;
+    margin-top: 1;
+    align: left middle;
+}
+
+#buttons Button {
+    margin-right: 1;
+}
+
+#overwrite_row {
+    margin: 0 0 1 0;
+    align: left middle;
+    background: $warning;
+}
+
+#overwrite_row Label {
+    margin: 0 1 0 0;
+}
+
+#status {
+    min-height: 1;
+    margin-top: 1;
+    color: $warning;
+}
+
+/* Confirm modal */
+#confirm_body {
+    width: 80%;
+    max-width: 120;
+    height: 80%;
+    max-height: 34;
+    padding: 1 2;
+    border: round $accent;
+    background: $panel;
+}
+
+#confirm_title {
+    height: 2;
+    content-align: left middle;
+    text-style: bold;
+    color: $accent;
+}
+
+#confirm_subtitle {
+    margin-bottom: 1;
+    color: $text;
+}
+
+#preview_box {
+    height: 1fr;
+    border: round $secondary;
+    background: $surface;
+    padding: 1;
+}
+
+#preview_commands {
+    width: 1fr;
+    color: $text;
+}
+
+#confirm_buttons {
+    height: 3;
+    margin-top: 1;
+    align: right middle;
+}
+
+#confirm_buttons Button {
+    margin-left: 1;
+}
+
+/* Run screen */
+#run_body {
+    padding: 1 2;
+}
+
+#run_title {
+    height: 2;
+    content-align: left middle;
+    text-style: bold;
+    color: $success;
+}
+
+#log {
+    height: 1fr;
+    border: round $primary;
+    background: $boost;
+    padding: 1;
+}
+
+#back {
+    margin-top: 1;
+    align: right middle;
+}
+
+#library{
+    margin: 0;
+    padding: 0;
+    height: auto;
+}
+
+/* Config screen */
+#cfg_title {
+    height: 2;
+    content-align: left middle;
+    text-style: bold;
+    color: $accent;
+}
+
+#cfg_status {
+    min-height: 1;
+    margin-top: 1;
+    color: $success;
+}
